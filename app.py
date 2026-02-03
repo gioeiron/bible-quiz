@@ -215,6 +215,42 @@ def mode2_play(sheet):
 
 # --- MAIN ROUTER ---
 
+def render_sidebar():
+    # Only show navigation if the user is logged in
+    if st.session_state.user_email:
+        with st.sidebar:
+            st.header(f"👤 {st.session_state.user_email}")
+            st.write(f"**Total Score:** {st.session_state.score}")
+            st.divider()
+            
+            st.subheader("Navigation")
+            
+            # HOME BUTTON
+            if st.button("🏠 Main Menu", use_container_width=True):
+                st.session_state.page = 'menu'
+                st.rerun()
+
+            # MODE 1 BUTTON
+            if st.button("📂 Mode 1: Categories", use_container_width=True):
+                st.session_state.page = 'mode1_select'
+                st.session_state.m1_answers = [] # Optional: Reset progress on switch
+                st.rerun()
+
+            # MODE 2 BUTTON
+            if st.button("🕵️ Mode 2: Characters", use_container_width=True):
+                st.session_state.page = 'mode2_play'
+                st.session_state.m2_index = 0 # Optional: Reset to start
+                st.rerun()
+                
+            st.divider()
+            
+            # LOGOUT BUTTON
+            if st.button("Log Out", type="primary", use_container_width=True):
+                # Clear session state
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.rerun()
+
 def main():
     try:
         sheet = connect_to_sheet()
