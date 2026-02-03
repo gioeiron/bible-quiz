@@ -161,18 +161,18 @@ def render_sidebar():
                 st.session_state.page = 'menu'
                 st.rerun()
 
-            if st.button("📂 Mode 1: Categories", use_container_width=True):
+            if st.button("📂 Name All by Category", use_container_width=True):
                 st.session_state.page = 'mode1_select'
                 st.session_state.m1_answers = [] 
                 st.rerun()
 
-            if st.button("🕵️ Mode 2: Characters", use_container_width=True):
+            if st.button("🕵️ Guess the Character", use_container_width=True):
                 st.session_state.page = 'mode2_play'
                 st.rerun()
                 
             st.divider()
             
-            if st.button("Log Out", type="primary", use_container_width=True):
+            if st.button("Log Out", type="secondary", use_container_width=True):
                 for key in list(st.session_state.keys()):
                     del st.session_state[key]
                 st.rerun()
@@ -213,21 +213,21 @@ def menu_page():
     col1, col2 = st.columns(2)
     
     with col1:
-        st.info("### Mode 1: Category")
-        st.write("Name a specific number of items that match a category.")
-        if st.button("Play Category Mode"):
+        st.info("### Name All by Category")
+        st.write("Name the characters that match the category.")
+        if st.button("Play Category Mode", type="primary"): # Made PROMINENT (Red)
             st.session_state.page = 'mode1_select'
             st.rerun()
 
     with col2:
-        st.info("### Mode 2: Characters")
-        st.write("Guess the Bible character from clues. (Points: 3, 2, or 1)")
+        st.info("### Guess the Character")
+        st.write("Guess the Bible character from a series of clues that describe them.")
         if st.button("Play Character Mode"):
             st.session_state.page = 'mode2_play'
             st.rerun()
 
 def mode1_select(sheet):
-    st.title("📂 Mode 1: Categories")
+    st.title("📂 Name All by Category")
     
     try:
         cat_sheet = sheet.worksheet("1-Category")
@@ -276,7 +276,8 @@ def mode1_play(sheet):
         return
 
     st.title(f"Topic: {cat['CategoryName']}")
-    st.write(f"Please list **{cat['TotalRequired']}** answers.")
+    # Updated Instruction Text
+    st.write(f"You need a total of **{cat['TotalRequired']}** answers. Provide one name at a time. Check your spelling!")
     
     # Progress Bar
     progress_val = len(st.session_state.m1_answers) / cat['TotalRequired']
@@ -359,7 +360,8 @@ def mode1_play(sheet):
 
 def mode2_play(sheet):
     st.title("🕵️ Guess the Character")
-    st.info("Points: 1st Try = 3pts | 2nd Try = 2pts | 3rd Try = 1pt")
+    # Updated Instruction Text
+    st.info("Guess the character based on the clue. First attempt gives you 3 points. Wrong answers will provide more clues but minus 1 point. Check your spelling!")
     
     try:
         char_sheet = sheet.worksheet("2-Characters")
@@ -368,7 +370,7 @@ def mode2_play(sheet):
         st.error(f"Error loading characters: {e}")
         return
 
-    # --- FIX: Use Enumerate for Display Label ---
+    # Use Enumerate for Display Label
     for i, char in enumerate(characters):
         c_id = str(char['CharacterID_Old'])
         correct_name = str(char['CharacterName']).strip()
@@ -399,27 +401,31 @@ def mode2_play(sheet):
 
             with col_interaction:
                 if not state['solved']:
-                    guess = st.text_input("Guess", key=f"input_{c_id}")
-                    if st.button("Submit", key=f"btn_{c_id}"):
-                        clean_guess = guess.strip().lower()
-                        clean_answer = correct_name.lower()
+                    # WRAP IN FORM TO ENABLE ENTER KEY
+                    with st.form(key=f"form_{c_id}", clear_on_submit=False):
+                        guess = st.text_input("Guess", key=f"input_{c_id}")
+                        submitted = st.form_submit_button("Submit")
                         
-                        if clean_guess == clean_answer:
-                            # --- SCORING LOGIC ---
-                            points_map = {0: 3, 1: 2}
-                            points_earned = points_map.get(state['attempts'], 1)
+                        if submitted:
+                            clean_guess = guess.strip().lower()
+                            clean_answer = correct_name.lower()
                             
-                            st.session_state.m2_progress[c_id]['solved'] = True
-                            st.session_state.score += points_earned
-                            
-                            save_mode2_guess(sheet, c_id, state['attempts'], True, guess)
-                            st.toast(f"Correct! +{points_earned} Points")
-                            st.rerun()
-                        else:
-                            st.error("Wrong")
-                            st.session_state.m2_progress[c_id]['attempts'] += 1
-                            save_mode2_guess(sheet, c_id, state['attempts'], False, guess)
-                            st.rerun()
+                            if clean_guess == clean_answer:
+                                # --- SCORING LOGIC ---
+                                points_map = {0: 3, 1: 2}
+                                points_earned = points_map.get(state['attempts'], 1)
+                                
+                                st.session_state.m2_progress[c_id]['solved'] = True
+                                st.session_state.score += points_earned
+                                
+                                save_mode2_guess(sheet, c_id, state['attempts'], True, guess)
+                                st.toast(f"Correct! +{points_earned} Points")
+                                st.rerun()
+                            else:
+                                st.error("Wrong")
+                                st.session_state.m2_progress[c_id]['attempts'] += 1
+                                save_mode2_guess(sheet, c_id, state['attempts'], False, guess)
+                                st.rerun()
 
 # --- MAIN APP ---
 
