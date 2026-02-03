@@ -187,11 +187,11 @@ def render_sidebar():
 
 def home_page(sheet):
     st.title("📖 Bible Characters Quiz")
-    st.write("Enter your Name and a secret PIN to access your game.")
+    st.write("Enter your Name and a PIN to access your game. Any 4-digit number should work for the PIN")
     
     col1, col2 = st.columns([2, 1])
     with col1:
-        name = st.text_input("Name / Nickname", placeholder="e.g. David").strip()
+        name = st.text_input("Name / Nickname", placeholder="e.g. Juan").strip()
     with col2:
         pin = st.text_input("4-Digit PIN", type="password", placeholder="1234", max_chars=4).strip()
     
@@ -210,7 +210,7 @@ def home_page(sheet):
             st.session_state.page = 'menu'
             st.rerun()
         else:
-            st.error("Please enter a Name and a PIN (at least 2 digits).")
+            st.error("Please enter a Name and a PIN (at least 4 digits).")
 
 def menu_page():
     st.title(f"Welcome, {st.session_state.display_name}!")
