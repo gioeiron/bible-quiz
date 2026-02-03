@@ -140,9 +140,9 @@ def render_sidebar():
 
 def home_page(sheet):
     st.title("📖 Bible Characters Quiz")
-    st.write("Please enter your email to start.")
+    st.write("Please enter your name to start.")
     
-    email = st.text_input("Email Address", placeholder="you@example.com")
+    email = st.text_input("Name", placeholder="Your Name")
     
     if st.button("Start Game", type="primary"):
         if email:
