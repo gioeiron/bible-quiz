@@ -37,11 +37,10 @@ if 'm1_answers' not in st.session_state:
     st.session_state.m1_answers = []
 if 'current_category' not in st.session_state:
     st.session_state.current_category = None
-# Mode 2 Specifics
-if 'm2_index' not in st.session_state:
-    st.session_state.m2_index = 0
-if 'm2_attempts' not in st.session_state:
-    st.session_state.m2_attempts = 0
+# Mode 2 Specifics (List View Logic)
+if 'm2_progress' not in st.session_state:
+    st.session_state.m2_progress = {} 
+    # Structure: { 'char_id': {'attempts': 0, 'solved': False} }
 
 # --- HELPER FUNCTIONS ---
 
@@ -91,7 +90,6 @@ def render_sidebar():
 
             if st.button("🕵️ Mode 2: Characters", use_container_width=True):
                 st.session_state.page = 'mode2_play'
-                st.session_state.m2_index = 0 # Reset to start of list
                 st.rerun()
                 
             st.divider()
@@ -137,7 +135,6 @@ def menu_page():
         st.write("Guess the Bible character based on 3 progressively easier clues.")
         if st.button("Play Character Mode"):
             st.session_state.page = 'mode2_play'
-            st.session_state.m2_index = 0
             st.rerun()
 
 def mode1_select(sheet):
@@ -182,14 +179,16 @@ def mode1_play(sheet):
     if st.session_state.m1_answers:
         st.success(f"✅ Correct so far: {', '.join(st.session_state.m1_answers)}")
 
-    # -- 3. Input Form --
+    # -- 3. Game Logic --
     if len(st.session_state.m1_answers) < cat['TotalRequired']:
+        
+        # A. The Input Form
         with st.form("ans_form", clear_on_submit=True):
             user_input = st.text_input("Enter an answer:")
             submitted = st.form_submit_button("Submit")
             
             if submitted and user_input:
-                # --- NEW ROBUST CHECKING LOGIC ---
+                # --- ROBUST CHECKING LOGIC ---
                 ans_sheet = sheet.worksheet("1-CategoryAnswer")
                 all_answers = ans_sheet.get_all_records()
                 
@@ -207,28 +206,40 @@ def mode1_play(sheet):
                 
                 # Check logic
                 if clean_input in valid_answers:
-                    # Check for duplicates in current session
                     current_found = [x.lower() for x in st.session_state.m1_answers]
                     if clean_input in current_found:
                         st.warning(f"⚠️ You already entered '{user_input}'!")
                     else:
-                        # Add the original formatted text (title case) for display
                         st.session_state.m1_answers.append(user_input.strip().title())
                         st.rerun()
                 else:
                     st.error(f"❌ '{user_input}' is not in the acceptable list.")
+        
+        # B. Partial Save Button (NEW!)
+        st.markdown("---")
+        st.write("Stuck? You can finish now and save your current points.")
+        if st.button("💾 Finish & Save Partial Score"):
+            points_earned = len(st.session_state.m1_answers)
+            save_mode1_session(sheet, cat['CategoryID'], points_earned, st.session_state.m1_answers)
+            st.session_state.score += points_earned
+            st.success(f"Saved! You got {points_earned} points.")
+            time.sleep(1.5)
+            st.session_state.page = 'menu'
+            st.rerun()
+
     else:
         # -- 4. Win State --
         st.balloons()
         st.success("🎉 Category Complete!")
-        if st.button("Finish & Save Score"):
+        if st.button("Finish & Save Perfect Score"):
             save_mode1_session(sheet, cat['CategoryID'], len(st.session_state.m1_answers), st.session_state.m1_answers)
             st.session_state.score += len(st.session_state.m1_answers)
             st.session_state.page = 'menu'
             st.rerun()
 
 def mode2_play(sheet):
-    st.title("🕵️ Guess the Character")
+    st.title("🕵️ Guess the Character (List Mode)")
+    st.info("Here are all the characters. Clues will reveal as you make attempts!")
     
     try:
         char_sheet = sheet.worksheet("2-Characters")
@@ -236,60 +247,60 @@ def mode2_play(sheet):
     except Exception as e:
         st.error(f"Error loading characters: {e}")
         return
-    
-    # Check if we reached the end of the list
-    if st.session_state.m2_index >= len(characters):
-        st.success("🎉 You have finished all available characters!")
-        if st.button("Back to Menu"):
-            st.session_state.page = 'menu'
-            st.rerun()
-        return
 
-    current_char = characters[st.session_state.m2_index]
-    
-    # Display Clues based on attempts
-    st.markdown("### Clues")
-    clues = [current_char['Clue1'], current_char['Clue2'], current_char['Clue3']]
-    
-    for i in range(st.session_state.m2_attempts + 1):
-        if i < 3:
-            # Use different colors/icons for subsequent clues
-            icon = "ONE" if i == 0 else "TWO" if i == 1 else "THREE"
-            st.info(f"**Clue {i+1}:** {clues[i]}")
-            
-    # Guess Form
-    with st.form("guess_form", clear_on_submit=True):
-        guess = st.text_input("Who is this?")
-        submitted = st.form_submit_button("Submit Guess")
+    # Loop through EVERY character in the sheet
+    for char in characters:
+        c_id = str(char['CharacterID_Old']) # Use ID as a unique key
+        correct_name = str(char['CharacterName']).strip()
         
-        if submitted and guess:
-            # Clean inputs
-            clean_guess = guess.strip().lower()
-            clean_answer = str(current_char['CharacterName']).strip().lower()
+        # 1. Initialize State for this specific character if not exists
+        if c_id not in st.session_state.m2_progress:
+            st.session_state.m2_progress[c_id] = {'attempts': 0, 'solved': False}
+        
+        state = st.session_state.m2_progress[c_id]
+        
+        # 2. Draw the "Card" for this character
+        with st.container(border=True):
+            col_clues, col_interaction = st.columns([3, 1])
             
-            if clean_guess == clean_answer:
-                st.success(f"✅ Correct! It was {current_char['CharacterName']}.")
-                st.session_state.score += 1
-                save_mode2_guess(sheet, current_char['CharacterID_Old'], st.session_state.m2_attempts, True, guess)
-                
-                # Advance to next character
-                st.session_state.m2_index += 1
-                st.session_state.m2_attempts = 0
-                time.sleep(1.5) # Pause so user can see the success message
-                st.rerun()
-            else:
-                st.error("❌ Wrong answer.")
-                save_mode2_guess(sheet, current_char['CharacterID_Old'], st.session_state.m2_attempts, False, guess)
-                
-                if st.session_state.m2_attempts < 2:
-                    st.session_state.m2_attempts += 1
-                    st.rerun()
+            with col_clues:
+                if state['solved']:
+                    st.success(f"✅ **SOLVED:** {correct_name}")
                 else:
-                    st.error(f"💀 Out of clues! The correct answer was **{current_char['CharacterName']}**.")
-                    if st.form_submit_button("Next Character"):
-                         st.session_state.m2_index += 1
-                         st.session_state.m2_attempts = 0
-                         st.rerun()
+                    st.markdown(f"**Character #{c_id}**")
+                    # Determine which clues to show based on attempts
+                    clues = [char['Clue1'], char['Clue2'], char['Clue3']]
+                    
+                    # Always show Clue 1. If attempts > 0, show Clue 2, etc.
+                    visible_count = min(state['attempts'] + 1, 3)
+                    
+                    for i in range(visible_count):
+                        st.write(f"🔹 *Clue {i+1}:* {clues[i]}")
+                    
+                    if state['attempts'] >= 2 and not state['solved']:
+                        st.warning("⚠️ Last Clue Revealed!")
+
+            with col_interaction:
+                if not state['solved']:
+                    # Unique Key is CRITICAL here so Streamlit knows which box is which
+                    guess = st.text_input("Your Guess", key=f"input_{c_id}")
+                    
+                    if st.button("Submit", key=f"btn_{c_id}"):
+                        clean_guess = guess.strip().lower()
+                        clean_answer = correct_name.lower()
+                        
+                        if clean_guess == clean_answer:
+                            # CORRECT
+                            st.session_state.m2_progress[c_id]['solved'] = True
+                            st.session_state.score += 1
+                            save_mode2_guess(sheet, c_id, state['attempts'], True, guess)
+                            st.rerun()
+                        else:
+                            # WRONG
+                            st.error("Wrong")
+                            st.session_state.m2_progress[c_id]['attempts'] += 1
+                            save_mode2_guess(sheet, c_id, state['attempts'], False, guess)
+                            st.rerun()
 
 # --- MAIN APP ORCHESTRATOR ---
 
