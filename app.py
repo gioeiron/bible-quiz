@@ -185,7 +185,7 @@ def home_page(sheet):
     
     col1, col2 = st.columns([2, 1])
     with col1:
-        name = st.text_input("Name / Nickname", placeholder="e.g. David").strip()
+        name = st.text_input("Name / Nickname", placeholder="e.g. Juan").strip()
     with col2:
         pin = st.text_input("4-Digit PIN", type="password", placeholder="1234", max_chars=4).strip()
     
@@ -368,9 +368,11 @@ def mode2_play(sheet):
         st.error(f"Error loading characters: {e}")
         return
 
-    for char in characters:
+    # --- FIX: Use Enumerate for Display Label ---
+    for i, char in enumerate(characters):
         c_id = str(char['CharacterID_Old'])
         correct_name = str(char['CharacterName']).strip()
+        display_label = f"Character #{i + 1}" # Generic Label
         
         # Init State
         if c_id not in st.session_state.m2_progress:
@@ -385,12 +387,12 @@ def mode2_play(sheet):
                 if state['solved']:
                     st.success(f"✅ **SOLVED:** {correct_name}")
                 else:
-                    st.markdown(f"**Character #{c_id}**")
+                    st.markdown(f"**{display_label}**") # Show Generic Label
                     clues = [char['Clue1'], char['Clue2'], char['Clue3']]
                     visible_count = min(state['attempts'] + 1, 3)
                     
-                    for i in range(visible_count):
-                        st.write(f"🔹 *Clue {i+1}:* {clues[i]}")
+                    for k in range(visible_count):
+                        st.write(f"🔹 *Clue {k+1}:* {clues[k]}")
                     
                     if state['attempts'] >= 2:
                         st.warning("⚠️ Final Clue!")
