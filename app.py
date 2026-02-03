@@ -259,6 +259,10 @@ def main():
         st.error(e)
         return
 
+    # --- RENDER SIDEBAR (New!) ---
+    render_sidebar()
+
+    # --- PAGE ROUTING ---
     if st.session_state.page == 'home':
         home_page()
     elif st.session_state.page == 'menu':
