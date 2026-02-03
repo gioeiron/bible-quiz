@@ -220,7 +220,7 @@ def menu_page():
     
     with col1:
         st.info("### Mode 1: Category")
-        st.write("Name a specific number of items that match a category.")
+        st.write("Name the characters that match the category. Ex. Name the 12 Apostles")
         if st.button("Play Category Mode"):
             st.session_state.page = 'mode1_select'
             st.rerun()
