@@ -10,12 +10,14 @@ st.set_page_config(page_title="Bible Character Quiz", page_icon="📖", layout="
 # --- CONNECT TO GOOGLE SHEETS ---
 @st.cache_resource
 def connect_to_sheet():
+    # Attempt to load from Streamlit Secrets (for Cloud Deployment)
     if "gcp_service_account" in st.secrets:
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(
             creds_dict, 
             ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         )
+    # Fallback to local file (for Local Testing)
     else:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
@@ -29,13 +31,13 @@ if 'page' not in st.session_state:
 if 'score' not in st.session_state:
     st.session_state.score = 0
 if 'user_id' not in st.session_state:
-    st.session_state.user_id = "" # This will store "Name_PIN"
+    st.session_state.user_id = "" # Stores "Name_PIN"
 if 'display_name' not in st.session_state:
-    st.session_state.display_name = "" # Just the Name for display
+    st.session_state.display_name = ""
 
-# History State
+# History State (To remember what is finished)
 if 'history_mode1' not in st.session_state:
-    st.session_state.history_mode1 = {} 
+    st.session_state.history_mode1 = {} # { 'cat_id': best_score }
 if 'history_mode2' not in st.session_state:
     st.session_state.history_mode2 = [] 
 
@@ -66,7 +68,6 @@ def fetch_user_history(sheet, user_id):
         
         for row in user_m1:
             c_id = str(row['CategoryID'])
-            # Handle potential empty strings in Score
             try:
                 score = int(row['Score'])
             except:
@@ -99,11 +100,10 @@ def fetch_user_history(sheet, user_id):
             if c_id not in solved_chars:
                 solved_chars.add(c_id)
                 
-                # Calculate points based on stored attempts
                 try:
                     attempts = int(row['CurrentAttempts'])
                 except:
-                    attempts = 2 # Default to lowest score if data error
+                    attempts = 2 # Default to 1pt if data error
                 
                 # Scoring Logic: 0 attempts=3pts, 1 attempt=2pts, >=2 attempts=1pt
                 if attempts == 0:
@@ -115,8 +115,7 @@ def fetch_user_history(sheet, user_id):
                     
         total_calculated_score += m2_points
         
-        # Update Session State so Mode 2 knows what is solved
-        # We need to pre-fill m2_progress so the UI shows "Solved" immediately
+        # Pre-fill m2_progress so UI shows "Solved" immediately
         for c_id in solved_chars:
              if c_id not in st.session_state.m2_progress:
                  st.session_state.m2_progress[c_id] = {'attempts': 0, 'solved': True}
@@ -133,21 +132,16 @@ def save_mode1_session(sheet, category_id, score, answers):
     session_sheet = sheet.worksheet("Mode1_Sessions")
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     session_id = f"SESS-{int(time.time())}"
+    
     # Use user_id (Name_PIN) for storage
     row_data = [session_id, category_id, st.session_state.user_id, timestamp, score] + answers
     while len(row_data) < 20: 
         row_data.append("")
     session_sheet.append_row(row_data)
-    
-    # Update local history immediately
-    current_best = st.session_state.history_mode1.get(str(category_id), 0)
-    if score > current_best:
-        st.session_state.history_mode1[str(category_id)] = score
 
 def save_mode2_guess(sheet, char_id, attempts, solved, guess):
     session_sheet = sheet.worksheet("Mode2_Sessions")
     guess_id = f"GUESS-{int(time.time())}-{char_id}"
-    # Use user_id (Name_PIN) for storage
     row_data = [guess_id, char_id, st.session_state.user_id, attempts, str(solved).upper(), guess]
     session_sheet.append_row(row_data)
 
@@ -157,7 +151,7 @@ def render_sidebar():
     if st.session_state.user_id:
         with st.sidebar:
             st.header(f"👤 {st.session_state.display_name}")
-            st.caption(f"ID: {st.session_state.user_id}") # Show full ID for reference
+            st.caption(f"ID: {st.session_state.user_id}")
             st.metric("TOTAL SCORE", st.session_state.score)
             
             st.divider()
@@ -187,11 +181,11 @@ def render_sidebar():
 
 def home_page(sheet):
     st.title("📖 Bible Characters Quiz")
-    st.write("Enter your Name and a PIN to access your game. Any 4-digit number should work for the PIN")
+    st.write("Enter your Name and a secret PIN to access your game.")
     
     col1, col2 = st.columns([2, 1])
     with col1:
-        name = st.text_input("Name / Nickname", placeholder="e.g. Juan").strip()
+        name = st.text_input("Name / Nickname", placeholder="e.g. David").strip()
     with col2:
         pin = st.text_input("4-Digit PIN", type="password", placeholder="1234", max_chars=4).strip()
     
@@ -210,7 +204,7 @@ def home_page(sheet):
             st.session_state.page = 'menu'
             st.rerun()
         else:
-            st.error("Please enter a Name and a PIN (at least 4 digits).")
+            st.error("Please enter a Name and a PIN (at least 2 digits).")
 
 def menu_page():
     st.title(f"Welcome, {st.session_state.display_name}!")
@@ -220,7 +214,7 @@ def menu_page():
     
     with col1:
         st.info("### Mode 1: Category")
-        st.write("Name the characters that match the category. Ex. Name the 12 Apostles")
+        st.write("Name a specific number of items that match a category.")
         if st.button("Play Category Mode"):
             st.session_state.page = 'mode1_select'
             st.rerun()
@@ -324,14 +318,23 @@ def mode1_play(sheet):
         
         st.markdown("---")
         if st.button("💾 Give Up & Save Score"):
-            points = len(st.session_state.m1_answers)
-            # IMPORTANT: We calculate the point gain based on history to avoid double counting in session state
-            # But simplest is just to save. The fetch_history will fix the total next login.
-            save_mode1_session(sheet, cat['CategoryID'], points, st.session_state.m1_answers)
+            new_score = len(st.session_state.m1_answers)
+            c_id = str(cat['CategoryID'])
             
-            # Simple UI update
-            st.success(f"Saved! You got {points} points.")
-            time.sleep(1.5)
+            # --- SCORING FIX ---
+            previous_best = st.session_state.history_mode1.get(c_id, 0)
+            
+            if new_score > previous_best:
+                diff = new_score - previous_best
+                st.session_state.score += diff
+                st.session_state.history_mode1[c_id] = new_score
+                st.success(f"New High Score! Added +{diff} points.")
+            else:
+                st.info(f"Saved. (You didn't beat your previous record of {previous_best})")
+
+            save_mode1_session(sheet, cat['CategoryID'], new_score, st.session_state.m1_answers)
+            
+            time.sleep(2)
             st.session_state.page = 'mode1_select' 
             st.rerun()
 
@@ -339,7 +342,18 @@ def mode1_play(sheet):
         st.balloons()
         st.success("🎉 PERFECT SCORE!")
         if st.button("Finish & Save"):
+            new_score = len(st.session_state.m1_answers)
+            c_id = str(cat['CategoryID'])
+            
+            previous_best = st.session_state.history_mode1.get(c_id, 0)
+            
+            if new_score > previous_best:
+                diff = new_score - previous_best
+                st.session_state.score += diff
+                st.session_state.history_mode1[c_id] = new_score
+            
             save_mode1_session(sheet, cat['CategoryID'], len(st.session_state.m1_answers), st.session_state.m1_answers)
+            
             st.session_state.page = 'mode1_select'
             st.rerun()
 
@@ -394,7 +408,7 @@ def mode2_play(sheet):
                             points_earned = points_map.get(state['attempts'], 1)
                             
                             st.session_state.m2_progress[c_id]['solved'] = True
-                            st.session_state.score += points_earned # Immediate UI update
+                            st.session_state.score += points_earned
                             
                             save_mode2_guess(sheet, c_id, state['attempts'], True, guess)
                             st.toast(f"Correct! +{points_earned} Points")
