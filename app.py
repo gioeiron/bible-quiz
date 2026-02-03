@@ -222,7 +222,7 @@ def menu_page():
     with col2:
         st.info("### Guess the Character")
         st.write("Guess the Bible character from a series of clues that describe them.")
-        if st.button("Play Character Mode"):
+        if st.button("Play Character Mode", type="primary"):
             st.session_state.page = 'mode2_play'
             st.rerun()
 
