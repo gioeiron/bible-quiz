@@ -151,16 +151,17 @@ def mode1_select(categories):
 def mode1_play(all_answers_data):
     cat = st.session_state.current_category
     st.title(f"Topic: {cat['CategoryName']}")
-    st.progress(len(st.session_state.m1_answers) / cat['TotalRequired'])
+    
+    req = int(cat['TotalRequired'])
+    st.progress(len(st.session_state.m1_answers) / req)
     
     if st.session_state.m1_answers:
         st.success(f"✅ Correct: {', '.join(st.session_state.m1_answers)}")
 
-    if len(st.session_state.m1_answers) < cat['TotalRequired']:
+    if len(st.session_state.m1_answers) < req:
         with st.form("ans_form", clear_on_submit=True):
             user_input = st.text_input("Enter an answer:").strip().lower()
             if st.form_submit_button("Submit") and user_input:
-                # Filter cached answers in-memory (Super Fast)
                 valid_answers = [str(r['CorrectAnswer']).lower() for r in all_answers_data 
                                  if str(r['CategoryID']) == str(cat['CategoryID'])]
                 
@@ -170,14 +171,35 @@ def mode1_play(all_answers_data):
                         st.rerun()
                 else: st.error("Incorrect.")
 
+        # --- FIX: Update session state before saving ---
         if st.button("💾 Save & Exit"):
-            save_mode1_session(cat['CategoryID'], len(st.session_state.m1_answers), st.session_state.m1_answers)
+            c_id = str(cat['CategoryID'])
+            new_score = len(st.session_state.m1_answers)
+            previous_best = st.session_state.history_mode1.get(c_id, 0)
+            
+            # Update local memory so the UI changes immediately
+            if new_score > previous_best:
+                st.session_state.score += (new_score - previous_best)
+                st.session_state.history_mode1[c_id] = new_score
+
+            save_mode1_session(cat['CategoryID'], new_score, st.session_state.m1_answers)
             st.session_state.page = 'mode1_select'
             st.rerun()
     else:
         st.balloons()
+        
+        # --- FIX: Update session state before finishing ---
         if st.button("Finish"):
-            save_mode1_session(cat['CategoryID'], len(st.session_state.m1_answers), st.session_state.m1_answers)
+            c_id = str(cat['CategoryID'])
+            new_score = len(st.session_state.m1_answers)
+            previous_best = st.session_state.history_mode1.get(c_id, 0)
+            
+            # Update local memory so the UI changes immediately
+            if new_score > previous_best:
+                st.session_state.score += (new_score - previous_best)
+                st.session_state.history_mode1[c_id] = new_score
+
+            save_mode1_session(cat['CategoryID'], new_score, st.session_state.m1_answers)
             st.session_state.page = 'mode1_select'
             st.rerun()
 
