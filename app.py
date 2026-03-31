@@ -48,13 +48,27 @@ def fetch_user_history(user_id):
     try:
         m1_data = sheet.worksheet("Mode1_Sessions").get_all_records()
         user_m1 = [r for r in m1_data if str(r['UserEmail']) == user_id]
+        
         history_map = {}
+        saved_answers_map = {} # Temporary dictionary for the words
+        
+        # Define the standard columns so we know the rest are answers
+        known_cols = {'SessionID', 'CategoryID', 'UserEmail', 'Timestamp', 'Score'}
+        
         for row in user_m1:
             c_id = str(row['CategoryID'])
             score = int(row.get('Score', 0))
+            
+            # If this is the best score for this category, save the score AND the answers
             if c_id not in history_map or score > history_map[c_id]:
                 history_map[c_id] = score
+                
+                # Extract all columns that aren't the standard ones and aren't blank
+                answers = [str(v).strip() for k, v in row.items() if k not in known_cols and str(v).strip() != ""]
+                saved_answers_map[c_id] = answers
+                
         st.session_state.history_mode1 = history_map
+        st.session_state.m1_saved_answers = saved_answers_map # Save to global state
         total_score += sum(history_map.values())
     except: pass 
 
@@ -93,7 +107,8 @@ def save_mode2_guess(char_id, attempts, solved, guess):
 for key, val in {
     'page': 'home', 'score': 0, 'user_id': "", 'display_name': "",
     'history_mode1': {}, 'history_mode2': [], 'm1_answers': [], 
-    'current_category': None, 'm2_progress': {}
+    'current_category': None, 'm2_progress': {},
+    'm1_saved_answers': {} # <--- NEW: Stores the actual words guessed
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
@@ -144,7 +159,10 @@ def mode1_select(categories):
             
             if not is_complete and col2.button("Play", key=f"p_{c_id}", type="primary"):
                 st.session_state.current_category = cat
-                st.session_state.m1_answers = [] 
+                
+                # FIX: Load previous answers if they exist, otherwise start empty
+                st.session_state.m1_answers = st.session_state.m1_saved_answers.get(c_id, []).copy()
+                
                 st.session_state.page = 'mode1_play'
                 st.rerun()
 
@@ -152,16 +170,21 @@ def mode1_play(all_answers_data):
     cat = st.session_state.current_category
     st.title(f"Topic: {cat['CategoryName']}")
     
+    # 1. Cast TotalRequired to integer to prevent TypeErrors
     req = int(cat['TotalRequired'])
+    
+    # Update progress bar using the safely casted integer
     st.progress(len(st.session_state.m1_answers) / req)
     
     if st.session_state.m1_answers:
         st.success(f"✅ Correct: {', '.join(st.session_state.m1_answers)}")
 
+    # GAME LOOP: If they haven't found all answers yet
     if len(st.session_state.m1_answers) < req:
         with st.form("ans_form", clear_on_submit=True):
             user_input = st.text_input("Enter an answer:").strip().lower()
             if st.form_submit_button("Submit") and user_input:
+                # Filter cached answers in-memory (Super Fast)
                 valid_answers = [str(r['CorrectAnswer']).lower() for r in all_answers_data 
                                  if str(r['CategoryID']) == str(cat['CategoryID'])]
                 
@@ -169,36 +192,47 @@ def mode1_play(all_answers_data):
                     if user_input not in [x.lower() for x in st.session_state.m1_answers]:
                         st.session_state.m1_answers.append(user_input.title())
                         st.rerun()
-                else: st.error("Incorrect.")
+                else: 
+                    st.error("Incorrect.")
 
-        # --- FIX: Update session state before saving ---
+        # 2. Updated Save & Exit Logic
         if st.button("💾 Save & Exit"):
             c_id = str(cat['CategoryID'])
             new_score = len(st.session_state.m1_answers)
             previous_best = st.session_state.history_mode1.get(c_id, 0)
             
-            # Update local memory so the UI changes immediately
+            # Update local memory for score so UI updates immediately
             if new_score > previous_best:
                 st.session_state.score += (new_score - previous_best)
                 st.session_state.history_mode1[c_id] = new_score
+            
+            # Update local memory for the actual text words so they persist
+            st.session_state.m1_saved_answers[c_id] = st.session_state.m1_answers.copy()
 
+            # Push to Google Sheets
             save_mode1_session(cat['CategoryID'], new_score, st.session_state.m1_answers)
             st.session_state.page = 'mode1_select'
             st.rerun()
+            
+    # COMPLETED STATE: When they find all answers
     else:
         st.balloons()
         
-        # --- FIX: Update session state before finishing ---
+        # 3. Updated Finish Logic
         if st.button("Finish"):
             c_id = str(cat['CategoryID'])
             new_score = len(st.session_state.m1_answers)
             previous_best = st.session_state.history_mode1.get(c_id, 0)
             
-            # Update local memory so the UI changes immediately
+            # Update local memory for score so UI updates immediately
             if new_score > previous_best:
                 st.session_state.score += (new_score - previous_best)
                 st.session_state.history_mode1[c_id] = new_score
 
+            # Update local memory for the actual text words so they persist
+            st.session_state.m1_saved_answers[c_id] = st.session_state.m1_answers.copy()
+
+            # Push to Google Sheets
             save_mode1_session(cat['CategoryID'], new_score, st.session_state.m1_answers)
             st.session_state.page = 'mode1_select'
             st.rerun()
