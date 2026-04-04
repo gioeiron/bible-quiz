@@ -41,14 +41,12 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
-# FIX 1 — Cache get_workbook() so the workbook lookup is not a fresh API call
-# on every write. Previously every save_*() called get_workbook() which called
-# client.open() each time, consuming quota. Now it is resolved once globally.
 @st.cache_resource
 def get_workbook():
     """
     Opens the Google Sheet once and caches the reference globally.
-    All worksheet reads/writes go through this single cached handle.
+    All worksheet reads/writes share this single handle (avoids re-auth
+    overhead on every write).
     """
     return get_gspread_client().open("Bible Character Game  - Python")
 
@@ -57,8 +55,8 @@ def get_workbook():
 def fetch_master_data():
     """
     Fetches all static game data in one pass. Result is cached for 10 minutes
-    and shared across every user, so it costs 3 API reads per 10-minute window
-    regardless of how many users are active.
+    and shared across every user — 3 API reads per 10-minute window total,
+    regardless of concurrent users.
     """
     wb = get_workbook()
     categories = wb.worksheet("1-Category").get_all_records()
@@ -68,23 +66,23 @@ def fetch_master_data():
 
 
 # ---------------------------------------------------------------------------
-# USER DATA — reads (not cached; each user's data is personal)
+# USER DATA — reads
 # ---------------------------------------------------------------------------
 
 def fetch_user_history(user_id):
     """
-    Loads a single user's Mode 1 and Mode 2 history from Sheets.
+    Loads a user's full Mode 1 and Mode 2 history from Sheets and writes it
+    into session_state. Called at login AND every time the user returns to the
+    Home menu, so session_state always reflects the latest persisted state.
 
-    FIX 2 — Uses the cached workbook (no extra auth round-trip).
-    FIX 4 — Replaces bare `except: pass` with logged warnings shown to user.
+    ROOT CAUSE FIX 2 — Previously this was only called at login. Users who
+    played, saved, went Home, and re-entered a mode would see stale
+    session_state (missing progress from the session just completed).
+    Now it is called on every menu visit via _refresh_history_if_needed().
 
-    For Mode 1 we keep the session that achieved the highest score for each
-    category, and we store both the score and the actual answer words so the
-    user can see them when they return to an in-progress category.
-
-    GAMEPLAY — A category is considered COMPLETE when its stored score equals
-    TotalRequired. Completed categories are locked (no Play button shown) and
-    their saved answers are displayed as a read-only trophy view.
+    ROOT CAUSE FIX 3 — m2_progress now stores the actual attempt count used
+    at solve time (not always 0), so _recalculate_score() can compute the
+    correct point value (3 / 2 / 1) for each solved character.
     """
     wb          = get_workbook()
     total_score = 0
@@ -95,7 +93,7 @@ def fetch_user_history(user_id):
         user_m1 = [r for r in m1_data if str(r["UserEmail"]) == user_id]
 
         history_map       = {}  # {category_id: best_score}
-        saved_answers_map = {}  # {category_id: [answer, ...]}
+        saved_answers_map = {}  # {category_id: [answer words]}
         known_cols = {"SessionID", "CategoryID", "UserEmail", "Timestamp", "Score"}
 
         for row in user_m1:
@@ -104,7 +102,6 @@ def fetch_user_history(user_id):
 
             if c_id not in history_map or score > history_map[c_id]:
                 history_map[c_id] = score
-                # Everything beyond the standard columns is an answer word
                 words = [
                     str(v).strip()
                     for k, v in row.items()
@@ -137,29 +134,53 @@ def fetch_user_history(user_id):
             c_id = str(row["CharacterID"])
             if c_id not in solved_chars:
                 solved_chars.add(c_id)
+                # FIX 3 — preserve the real attempt count so score calc is correct
                 attempts   = int(row.get("CurrentAttempts", 2))
                 m2_points += 3 if attempts == 0 else 2 if attempts == 1 else 1
+                # Store the real attempt count (not always 0) so
+                # _recalculate_score() can re-derive points accurately
+                st.session_state.m2_progress[c_id] = {
+                    "attempts": attempts,
+                    "solved":   True,
+                }
 
         total_score += m2_points
-
-        for c_id in solved_chars:
-            st.session_state.m2_progress[c_id] = {"attempts": 0, "solved": True}
 
     except Exception as exc:
         logger.warning("Could not load Mode 2 history for %s: %s", user_id, exc)
         st.warning("⚠️ Could not load your Character Mode history. "
                    "Previous progress may not be shown.")
 
-    # FIX 5 — Set score directly from fetched totals, never via +=
     st.session_state.score = total_score
+
+
+def _refresh_history_if_needed():
+    """
+    ROOT CAUSE FIX 2 — Refreshes history from Sheets whenever the user
+    arrives at the Home menu. Uses a timestamp gate so we only hit the API
+    once per 60-second window rather than on every single Streamlit rerun.
+
+    Why 60 s and not the 10-minute master cache?
+    fetch_user_history() reads Mode1_Sessions and Mode2_Sessions, which are
+    write-heavy (user data). The master cache only covers static game data.
+    60 seconds is short enough to feel live while keeping quota usage low.
+    """
+    now  = time.time()
+    last = st.session_state.get("last_history_refresh", 0)
+
+    if now - last > 60:
+        fetch_user_history(st.session_state.user_id)
+        st.session_state.last_history_refresh = now
 
 
 def _recalculate_score():
     """
-    FIX 5 (helper) — Derives the current total score purely from the history
-    maps in session_state. Call this after any score-affecting event instead
-    of mutating st.session_state.score with +=, which double-counts on rapid
-    re-clicks or unexpected reruns.
+    Derives the total score purely from the history maps in session_state.
+    Call this after any local score-affecting event to keep the sidebar
+    metric accurate without hitting Sheets again.
+
+    FIX 3 — Uses the actual stored attempt count per character (which now
+    reflects the real solve attempt, not always 0) so points are correct.
     """
     m1_total = sum(st.session_state.history_mode1.values())
 
@@ -178,9 +199,9 @@ def _recalculate_score():
 
 def save_mode1_session(category_id, score, answers):
     """
-    Appends one Mode 1 session row to Google Sheets.
-    Uses the cached workbook (FIX 1) — no extra auth overhead.
-    Errors are surfaced to the user rather than silently swallowed (FIX 4).
+    Appends one Mode 1 session row to Google Sheets synchronously.
+    Called only when the user explicitly saves or finishes — not on every
+    guess — so the write frequency is very low.
     """
     try:
         sheet = get_workbook().worksheet("Mode1_Sessions")
@@ -191,7 +212,6 @@ def save_mode1_session(category_id, score, answers):
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             score,
         ] + answers
-        # Pad to 20 columns so the sheet structure stays consistent
         row += [""] * max(0, 20 - len(row))
         sheet.append_row(row)
     except Exception as exc:
@@ -199,55 +219,66 @@ def save_mode1_session(category_id, score, answers):
         st.error("❌ Your progress could not be saved. Please try again.")
 
 
-# FIX 3 — Mode 2 guesses are now buffered in session_state and flushed as a
-# single batch write (append_rows) instead of one append_row() per guess.
-# Previously every correct or incorrect guess blocked the Streamlit thread
-# with a synchronous network call; under load this queues up and can exhaust
-# the thread pool and hit the Sheets quota simultaneously.
-def queue_mode2_guess(char_id, attempts, solved, guess):
-    """Adds one Mode 2 guess to the in-memory write buffer."""
-    st.session_state.m2_pending_saves.append([
-        f"GUESS-{int(time.time())}-{char_id}",
-        char_id,
-        st.session_state.user_id,
-        attempts,
-        str(solved).upper(),
-        guess,
-    ])
+# ---------------------------------------------------------------------------
+# ROOT CAUSE FIX 1 — Mode 2 writes: write on every SOLVE, not on every guess
+# ---------------------------------------------------------------------------
+#
+# The previous version buffered ALL guesses (correct and wrong) and flushed
+# them only when the user clicked Home or Log Out. This meant:
+#   • If the tab was closed, refreshed, or the session timed out, the buffer
+#     in session_state was gone and solved characters were never persisted.
+#   • Users who solved characters but didn't click Home before closing would
+#     lose all Mode 2 progress on next login.
+#
+# New approach:
+#   • Wrong guesses are NOT written to Sheets at all. They are only tracked
+#     in session_state to control how many clues are revealed. This is safe
+#     because wrong-guess counts are already derived from CurrentAttempts in
+#     the solved row — we don't need a separate row per wrong guess.
+#   • A CORRECT guess (solve) is written to Sheets immediately as a single
+#     row. One small write at the moment of solve is far safer than buffering
+#     many rows that may never be flushed.
+#
+# This eliminates the lost-progress scenario entirely for Mode 2 without
+# sacrificing quota safety (one write per solve, not per guess).
 
-
-def flush_mode2_session():
+def save_mode2_solve(char_id, attempts_before_solve):
     """
-    Writes all buffered Mode 2 guesses to Sheets in a single API call.
-    Call on logout, Home navigation, or any session-exit point.
-    append_rows() sends the entire list in one HTTP request.
+    Persists a single SOLVED character to Sheets immediately.
+    Called only when the user gets the correct answer.
+    Wrong guesses are tracked in session_state only — no write needed.
     """
-    pending = st.session_state.get("m2_pending_saves", [])
-    if not pending:
-        return
     try:
-        get_workbook().worksheet("Mode2_Sessions").append_rows(pending)
-        st.session_state.m2_pending_saves = []
+        sheet = get_workbook().worksheet("Mode2_Sessions")
+        row = [
+            f"SOLVE-{int(time.time())}-{char_id}",
+            char_id,
+            st.session_state.user_id,
+            attempts_before_solve,
+            "TRUE",
+            "",   # no wrong guess text for a solve row
+        ]
+        sheet.append_row(row)
     except Exception as exc:
-        logger.error("Failed to flush Mode 2 session: %s", exc)
-        st.error("❌ Some guesses could not be saved. Please check your connection.")
+        logger.error("Failed to save Mode 2 solve for %s: %s", char_id, exc)
+        st.error("❌ Solve could not be saved. Please try again.")
 
 
 # ---------------------------------------------------------------------------
 # SESSION STATE DEFAULTS
 # ---------------------------------------------------------------------------
 _DEFAULTS = {
-    "page":             "home",
-    "score":            0,
-    "user_id":          "",
-    "display_name":     "",
-    "history_mode1":    {},  # {category_id: best_score}
-    "history_mode2":    [],
-    "m1_answers":       [],  # answers for the currently active category
-    "current_category": None,
-    "m2_progress":      {},  # {char_id: {attempts, solved}}
-    "m1_saved_answers": {},  # {category_id: [answer words from best session]}
-    "m2_pending_saves": [],  # FIX 3: buffered rows waiting to be flushed
+    "page":                  "home",
+    "score":                 0,
+    "user_id":               "",
+    "display_name":          "",
+    "history_mode1":         {},   # {category_id: best_score}
+    "history_mode2":         [],
+    "m1_answers":            [],   # answers for the currently active category
+    "current_category":      None,
+    "m2_progress":           {},   # {char_id: {attempts, solved}}
+    "m1_saved_answers":      {},   # {category_id: [answer words from best session]}
+    "last_history_refresh":  0,    # FIX 2: epoch timestamp of last Sheets read
 }
 
 for _key, _val in _DEFAULTS.items():
@@ -269,12 +300,11 @@ def render_sidebar():
         st.divider()
 
         if st.button("🏠 Home", use_container_width=True):
-            flush_mode2_session()  # FIX 3: flush buffered guesses before leaving
+            # No flush needed — Mode 2 solves are now written immediately
             st.session_state.page = "menu"
             st.rerun()
 
         if st.button("Log Out", type="secondary", use_container_width=True):
-            flush_mode2_session()  # FIX 3: flush before clearing state
             st.session_state.clear()
             st.rerun()
 
@@ -292,12 +322,39 @@ def home_page():
         if name and len(pin) >= 2:
             st.session_state.user_id      = f"{name}_{pin}"
             st.session_state.display_name = name
+            # Reset last_history_refresh so fetch runs immediately on first menu visit
+            st.session_state.last_history_refresh = 0
             with st.spinner("Loading your progress..."):
                 fetch_user_history(st.session_state.user_id)
+            st.session_state.last_history_refresh = time.time()
             st.session_state.page = "menu"
             st.rerun()
         else:
             st.error("Please enter a name and a PIN of at least 2 characters.")
+
+
+# ---------------------------------------------------------------------------
+# MENU
+# ---------------------------------------------------------------------------
+
+def menu_page():
+    """
+    FIX 2 — Calls _refresh_history_if_needed() on every visit so that
+    progress earned in the previous mode is reflected when the user comes
+    back to choose another mode (or the same one again).
+    """
+    # Refresh from Sheets if more than 60 s have passed since last read
+    with st.spinner("Refreshing your progress..."):
+        _refresh_history_if_needed()
+
+    st.title(f"Welcome, {st.session_state.display_name}! 👋")
+    col1, col2 = st.columns(2)
+    if col1.button("📂 Play Category Mode", type="primary", use_container_width=True):
+        st.session_state.page = "mode1_select"
+        st.rerun()
+    if col2.button("🕵️ Play Character Mode", type="primary", use_container_width=True):
+        st.session_state.page = "mode2_play"
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -306,16 +363,8 @@ def home_page():
 
 def mode1_select(categories):
     """
-    Lists all categories with their completion state.
-
-    GAMEPLAY FIX A — Completed categories (best_score >= TotalRequired) are
-    locked: the Play button is hidden and replaced with a trophy icon. The
-    answers from the user's best session are shown so they can review what
-    they submitted.
-
-    GAMEPLAY FIX B — In-progress categories show the Play button as normal.
-    Entering the play screen pre-loads the previously saved answers so the
-    user continues from where they left off.
+    Lists all categories. Completed ones are locked and show saved answers.
+    In-progress ones show the Play button and resume from the last save.
     """
     st.title("📂 Name All by Category")
 
@@ -332,19 +381,13 @@ def mode1_select(categories):
             col1.subheader(name)
 
             if is_complete:
-                # ---- COMPLETED & LOCKED ----
                 col1.success(f"✅ Completed! ({best_score}/{req})")
-
-                # Show the answers from the best session as a read-only trophy
                 saved = st.session_state.m1_saved_answers.get(c_id, [])
                 if saved:
                     col1.caption("Your answers: " + ", ".join(saved))
-
-                # No Play button — category is permanently locked
                 col2.markdown("### 🏆")
 
             else:
-                # ---- NOT STARTED OR IN-PROGRESS ----
                 if best_score > 0:
                     col1.write(f"In progress — best so far: {best_score}/{req}")
                 else:
@@ -352,7 +395,6 @@ def mode1_select(categories):
 
                 if col2.button("Play", key=f"p_{c_id}", type="primary"):
                     st.session_state.current_category = cat
-                    # GAMEPLAY FIX B: pre-load saved answers so user resumes
                     st.session_state.m1_answers = (
                         st.session_state.m1_saved_answers.get(c_id, []).copy()
                     )
@@ -366,23 +408,9 @@ def mode1_select(categories):
 
 def mode1_play(all_answers_data):
     """
-    The active quiz screen for a single category.
-
-    Key behaviours
-    ─────────────
-    • Progress bar and running list of correct answers shown at all times.
-    • Correct answers are appended and de-duplicated in-memory (no Sheet
-      write on each guess — fast and quota-friendly).
-    • "Save & Exit" saves current partial progress and returns to the list.
-      The user can come back and their answers will be waiting for them.
-    • When all answers are found, balloons fire and a "Finish" button writes
-      the final session and locks the category permanently.
-
-    GAMEPLAY FIX A — On Finish, history_mode1[c_id] is set to req locally
-    so the category shows as locked on the very next render of mode1_select
-    without needing another Sheets read.
-
-    FIX 5 — Score is recalculated from history maps after any update.
+    Active quiz screen for one category.
+    Answers are tracked in-memory. Sheets is written only on Save & Exit
+    or Finish — never on each individual guess.
     """
     cat  = st.session_state.current_category
     req  = int(cat["TotalRequired"])
@@ -394,7 +422,7 @@ def mode1_play(all_answers_data):
     if st.session_state.m1_answers:
         st.success("✅ Correct so far: " + ", ".join(st.session_state.m1_answers))
 
-    # ---- Active game loop (category not yet complete) ----
+    # ---- Active game loop ----
     if len(st.session_state.m1_answers) < req:
 
         with st.form("ans_form", clear_on_submit=True):
@@ -418,9 +446,8 @@ def mode1_play(all_answers_data):
             else:
                 st.error("Incorrect — try again.")
 
-        # Save & Exit — persists partial progress, user can resume later
         if st.button("💾 Save & Exit"):
-            _commit_mode1_session(cat, c_id, req, navigate_to="mode1_select")
+            _commit_mode1_session(cat, c_id, navigate_to="mode1_select")
 
     # ---- Completed state ----
     else:
@@ -428,41 +455,28 @@ def mode1_play(all_answers_data):
         st.info(f"🎉 You found all {req} answers for **{cat['CategoryName']}**!")
 
         if st.button("✅ Finish & Lock Category", type="primary"):
-            _commit_mode1_session(cat, c_id, req, navigate_to="mode1_select")
+            _commit_mode1_session(cat, c_id, navigate_to="mode1_select")
 
 
-def _commit_mode1_session(cat, c_id, req, navigate_to):
+def _commit_mode1_session(cat, c_id, navigate_to):
     """
-    Shared save logic called by both Save & Exit and Finish.
-
-    1. Compares new score to previous best and updates history maps only if
-       the new score is an improvement.
-    2. Recalculates total score from maps (FIX 5 — no +=).
-    3. Writes to Google Sheets only when there is a new best (avoids
-       redundant writes if the user exits without improving their score).
-    4. Navigates to the requested page.
-
-    GAMEPLAY FIX A — Because history_mode1[c_id] is updated to new_score
-    before navigation, the select screen immediately reflects the completed
-    state on the next render without an extra Sheets read.
+    Shared save logic for Save & Exit and Finish.
+    Only writes to Sheets and updates session_state maps when the new score
+    beats the previous best — no redundant writes on no-improvement exits.
     """
     new_score     = len(st.session_state.m1_answers)
     previous_best = st.session_state.history_mode1.get(c_id, 0)
 
     if new_score > previous_best:
-        # Update both the score map and the answer word map
         st.session_state.history_mode1[c_id]    = new_score
         st.session_state.m1_saved_answers[c_id] = st.session_state.m1_answers.copy()
-
-        # FIX 5 — Recalculate from maps, never +=
         _recalculate_score()
-
-        # Persist to Sheets
         save_mode1_session(cat["CategoryID"], new_score, st.session_state.m1_answers)
-
     else:
-        # No improvement — still recalculate in case state drifted
         _recalculate_score()
+
+    # Mark history as stale so the next menu visit re-reads from Sheets
+    st.session_state.last_history_refresh = 0
 
     st.session_state.page = navigate_to
     st.rerun()
@@ -474,14 +488,12 @@ def _commit_mode1_session(cat, c_id, req, navigate_to):
 
 def mode2_play(characters):
     """
-    Displays all characters. Solved ones show the name; unsolved ones show
-    progressive clues and an inline guess form.
+    Displays all characters with progressive clues and inline guess forms.
 
-    FIX 3 — Guesses are queued in session_state and flushed to Sheets in a
-    single batch on logout / Home navigation instead of one append_row() per
-    guess.
-
-    FIX 5 — Score is recalculated from m2_progress after each solve.
+    FIX 1 (root cause) — A correct guess is written to Sheets immediately
+    via save_mode2_solve(). Wrong guesses are tracked only in session_state.
+    This eliminates the lost-progress scenario where a buffered solve was
+    never flushed because the tab was closed or the session timed out.
     """
     st.title("🕵️ Guess the Character")
 
@@ -507,15 +519,21 @@ def mode2_play(characters):
                     guess = st.text_input("Guess").strip().lower()
                     if st.form_submit_button("Submit"):
                         if guess == correct_name.lower():
-                            st.session_state.m2_progress[c_id]["solved"] = True
-                            # FIX 5 — recalculate, never +=
+                            attempts_used = state["attempts"]
+                            # Update local state with the real attempt count
+                            st.session_state.m2_progress[c_id] = {
+                                "attempts": attempts_used,
+                                "solved":   True,
+                            }
                             _recalculate_score()
-                            # FIX 3 — buffer, don't write immediately
-                            queue_mode2_guess(c_id, state["attempts"], True, guess)
+                            # FIX 1 — write the solve to Sheets immediately
+                            save_mode2_solve(c_id, attempts_used)
+                            # Mark history stale so next menu visit re-reads
+                            st.session_state.last_history_refresh = 0
                             st.rerun()
                         else:
+                            # Wrong guess — update clue counter in memory only
                             st.session_state.m2_progress[c_id]["attempts"] += 1
-                            queue_mode2_guess(c_id, state["attempts"], False, guess)
                             st.rerun()
 
 
@@ -526,7 +544,6 @@ def mode2_play(characters):
 def main():
     render_sidebar()
 
-    # Static data — one cached fetch shared across all users
     try:
         categories, answers, characters = fetch_master_data()
     except Exception as exc:
@@ -540,14 +557,7 @@ def main():
         home_page()
 
     elif page == "menu":
-        st.title(f"Welcome, {st.session_state.display_name}! 👋")
-        col1, col2 = st.columns(2)
-        if col1.button("📂 Play Category Mode", type="primary", use_container_width=True):
-            st.session_state.page = "mode1_select"
-            st.rerun()
-        if col2.button("🕵️ Play Character Mode", type="primary", use_container_width=True):
-            st.session_state.page = "mode2_play"
-            st.rerun()
+        menu_page()
 
     elif page == "mode1_select":
         mode1_select(categories)
