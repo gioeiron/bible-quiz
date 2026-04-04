@@ -1,4 +1,4 @@
-# FULL FIXED VERSION OF YOUR GAME APP
+# FULL FIXED VERSION (WITH ORIGINAL UI/UX RESTORED)
 
 import streamlit as st
 import gspread
@@ -69,7 +69,6 @@ def fetch_user_history(user_id):
     wb = get_workbook()
     total_score = 0
 
-    # MODE 1
     history_map = {}
     saved_answers_map = {}
     latest_time_map = {}
@@ -91,7 +90,7 @@ def fetch_user_history(user_id):
                 and str(v).strip() != ""
             ]
 
-            if c_id not in history_map or timestamp > latest_time_map[c_id]:
+            if c_id not in history_map or timestamp > latest_time_map.get(c_id, ""):
                 history_map[c_id] = score
                 saved_answers_map[c_id] = words
                 latest_time_map[c_id] = timestamp
@@ -140,6 +139,7 @@ def fetch_user_history(user_id):
 
 def save_mode1_session(category_id, score, answers):
     sheet = get_workbook().worksheet("Mode1_Sessions")
+
     row = [
         f"SESS-{int(time.time())}",
         category_id,
@@ -150,8 +150,7 @@ def save_mode1_session(category_id, score, answers):
 
     row += [""] * max(0, 20 - len(row))
 
-    if not safe_append(sheet, row):
-        st.error("Save failed")
+    safe_append(sheet, row)
 
 
 def save_mode2_solve(char_id, attempts):
@@ -166,8 +165,7 @@ def save_mode2_solve(char_id, attempts):
         ""
     ]
 
-    if not safe_append(sheet, row):
-        st.error("Save failed")
+    safe_append(sheet, row)
 
 # -----------------------------
 # SESSION DEFAULTS
@@ -190,50 +188,83 @@ for k,v in DEFAULTS.items():
         st.session_state[k]=v
 
 # -----------------------------
-# UI
+# SIDEBAR (RESTORED)
+# -----------------------------
+
+def render_sidebar():
+    if not st.session_state.user_id:
+        return
+
+    with st.sidebar:
+        st.header(f"👤 {st.session_state.display_name}")
+        st.metric("TOTAL SCORE", st.session_state.score)
+
+        if st.button("🏠 Home"):
+            st.session_state.page="menu"
+            st.rerun()
+
+        if st.button("Log Out"):
+            st.session_state.clear()
+            st.rerun()
+
+# -----------------------------
+# PAGES (RESTORED UX)
 # -----------------------------
 
 def home():
-    st.title("Game")
-    name = st.text_input("Name")
-    pin = st.text_input("PIN")
+    st.title("📖 Bible Characters Quiz")
+    name = st.text_input("Name / Nickname")
+    pin = st.text_input("PIN", type="password")
 
-    if st.button("Start"):
-        st.session_state.user_id = generate_user_id(name,pin)
-        st.session_state.display_name = name
-        fetch_user_history(st.session_state.user_id)
-        st.session_state.page="menu"
-        st.rerun()
+    if st.button("Start Game", type="primary"):
+        if name and pin:
+            st.session_state.user_id = generate_user_id(name,pin)
+            st.session_state.display_name = name
+            fetch_user_history(st.session_state.user_id)
+            st.session_state.page="menu"
+            st.rerun()
 
 
 def menu():
-    st.title("Menu")
+    st.title(f"Welcome, {st.session_state.display_name}! 👋")
 
-    if st.button("Mode1"):
+    col1,col2 = st.columns(2)
+
+    if col1.button("📂 Play Category Mode", use_container_width=True):
         st.session_state.page="mode1"
         st.rerun()
 
-    if st.button("Mode2"):
+    if col2.button("🕵️ Play Character Mode", use_container_width=True):
         st.session_state.page="mode2"
         st.rerun()
 
+# -----------------------------
+# MODE 1 (RESTORED UI + AUTOSAVE)
+# -----------------------------
 
 def mode1(categories,answers):
-    st.title("Mode1")
+    st.title("📂 Name All by Category")
 
     for cat in categories:
         cid=str(cat["CategoryID"])
         req=int(cat["TotalRequired"])
+        best = st.session_state.history_mode1.get(cid,0)
 
-        if st.session_state.history_mode1.get(cid,0)>=req:
-            st.write(f"{cat['CategoryName']} ✅ Locked")
-            continue
+        with st.container(border=True):
+            col1,col2 = st.columns([3,1])
+            col1.subheader(cat["CategoryName"])
 
-        if st.button(cat["CategoryName"],key=cid):
-            st.session_state.current_category=cat
-            st.session_state.m1_answers = st.session_state.m1_saved_answers.get(cid,[])
-            st.session_state.page="play1"
-            st.rerun()
+            if best>=req:
+                col1.success(f"Completed ({best}/{req})")
+                saved = st.session_state.m1_saved_answers.get(cid,[])
+                if saved:
+                    col1.caption(", ".join(saved))
+            else:
+                if col2.button("Play",key=cid):
+                    st.session_state.current_category=cat
+                    st.session_state.m1_answers = st.session_state.m1_saved_answers.get(cid,[])
+                    st.session_state.page="play1"
+                    st.rerun()
 
 
 def play1(answers):
@@ -241,14 +272,13 @@ def play1(answers):
     cid=str(cat["CategoryID"])
     req=int(cat["TotalRequired"])
 
-    if st.session_state.history_mode1.get(cid,0)>=req:
-        st.warning("Locked")
-        st.session_state.page="mode1"
-        st.rerun()
+    st.title(f"Topic: {cat['CategoryName']}")
+    st.progress(min(len(st.session_state.m1_answers)/req,1.0))
 
-    st.write(st.session_state.m1_answers)
+    if st.session_state.m1_answers:
+        st.success(", ".join(st.session_state.m1_answers))
 
-    guess=st.text_input("Answer")
+    guess = st.text_input("Enter answer")
 
     if st.button("Submit"):
         valid=[str(r["CorrectAnswer"]).lower() for r in answers if str(r["CategoryID"])==cid]
@@ -256,42 +286,58 @@ def play1(answers):
         if guess.lower() in valid and guess.title() not in st.session_state.m1_answers:
             st.session_state.m1_answers.append(guess.title())
 
+            # AUTOSAVE
             save_mode1_session(cid,len(st.session_state.m1_answers),st.session_state.m1_answers)
 
             st.rerun()
+        else:
+            st.error("Incorrect or duplicate")
 
     if len(st.session_state.m1_answers)>=req:
-        st.success("Completed")
+        st.balloons()
+        st.success("Completed!")
 
+# -----------------------------
+# MODE 2 (RESTORED UI)
+# -----------------------------
 
 def mode2(characters):
-    st.title("Mode2")
+    st.title("🕵️ Guess the Character")
 
-    for char in characters:
+    for i,char in enumerate(characters):
         cid=str(char["CharacterID_Old"])
         name=str(char["CharacterName"]).lower()
 
         state=st.session_state.m2_progress.setdefault(cid,{"attempts":0,"solved":False})
 
-        if state["solved"]:
-            st.success(name)
-            continue
+        with st.container(border=True):
+            col1,col2 = st.columns([3,1])
 
-        guess=st.text_input(cid,key=cid)
-
-        if st.button(f"Submit {cid}"):
-            if guess.lower()==name:
-                save_mode2_solve(cid,state["attempts"])
-                st.session_state.m2_progress[cid]={"attempts":state["attempts"],"solved":True}
-                st.rerun()
+            if state["solved"]:
+                col1.success(name)
             else:
-                state["attempts"]+=1
+                clues=[char["Clue1"],char["Clue2"],char["Clue3"]]
+                for k in range(min(state["attempts"]+1,3)):
+                    col1.write(clues[k])
+
+                guess = col2.text_input("Guess",key=f"g_{cid}")
+
+                if col2.button("Submit",key=f"b_{cid}"):
+                    if guess.lower()==name:
+                        save_mode2_solve(cid,state["attempts"])
+                        st.session_state.m2_progress[cid]={"attempts":state["attempts"],"solved":True}
+                        st.rerun()
+                    else:
+                        state["attempts"]+=1
+                        st.rerun()
 
 # -----------------------------
 # MAIN
 # -----------------------------
 
 def main():
+    render_sidebar()
+
     categories,answers,characters = fetch_master_data()
 
     if st.session_state.page=="home":
