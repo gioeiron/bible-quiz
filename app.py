@@ -200,23 +200,29 @@ def _recalculate_score():
 def save_mode1_session(category_id, score, answers):
     """
     Appends one Mode 1 session row to Google Sheets synchronously.
-    Called only when the user explicitly saves or finishes — not on every
-    guess — so the write frequency is very low.
+    Now includes a retry mechanism for rate limits and returns True/False.
     """
-    try:
-        sheet = get_workbook().worksheet("Mode1_Sessions")
-        row = [
-            f"SESS-{int(time.time())}",
-            category_id,
-            st.session_state.user_id,
-            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            score,
-        ] + answers
-        row += [""] * max(0, 20 - len(row))
-        sheet.append_row(row)
-    except Exception as exc:
-        logger.error("Failed to save Mode 1 session: %s", exc)
-        st.error("❌ Your progress could not be saved. Please try again.")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            sheet = get_workbook().worksheet("Mode1_Sessions")
+            row = [
+                f"SESS-{int(time.time())}",
+                category_id,
+                st.session_state.user_id,
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                score,
+            ] + answers
+            row += [""] * max(0, 20 - len(row))
+            sheet.append_row(row)
+            return True # Successfully saved
+            
+        except Exception as exc:
+            if attempt < max_retries - 1:
+                time.sleep(1) # Wait 1 second and try again
+                continue
+            logger.error("Failed to save Mode 1 session after %s attempts: %s", max_retries, exc)
+            return False # Failed permanently
 
 
 # ---------------------------------------------------------------------------
@@ -461,25 +467,35 @@ def mode1_play(all_answers_data):
 def _commit_mode1_session(cat, c_id, navigate_to):
     """
     Shared save logic for Save & Exit and Finish.
-    Only writes to Sheets and updates session_state maps when the new score
-    beats the previous best — no redundant writes on no-improvement exits.
+    Now waits for Sheets validation BEFORE updating local session state.
     """
     new_score     = len(st.session_state.m1_answers)
     previous_best = st.session_state.history_mode1.get(c_id, 0)
 
     if new_score > previous_best:
-        st.session_state.history_mode1[c_id]    = new_score
-        st.session_state.m1_saved_answers[c_id] = st.session_state.m1_answers.copy()
-        _recalculate_score()
-        save_mode1_session(cat["CategoryID"], new_score, st.session_state.m1_answers)
+        # 1. Try to save to Google Sheets FIRST
+        success = save_mode1_session(cat["CategoryID"], new_score, st.session_state.m1_answers)
+        
+        if success:
+            # 2. ONLY update local memory if the database accepted it
+            st.session_state.history_mode1[c_id]    = new_score
+            st.session_state.m1_saved_answers[c_id] = st.session_state.m1_answers.copy()
+            _recalculate_score()
+            
+            # Mark history as stale so the next menu visit re-reads from Sheets
+            st.session_state.last_history_refresh = 0
+            
+            st.session_state.page = navigate_to
+            st.rerun()
+        else:
+            # 3. If it failed, show the error and DO NOT rerun, allowing the user to try again
+            st.error("❌ The database is currently busy. Please click Save again.")
     else:
+        # If the score isn't a new personal best, just navigate away safely
         _recalculate_score()
-
-    # Mark history as stale so the next menu visit re-reads from Sheets
-    st.session_state.last_history_refresh = 0
-
-    st.session_state.page = navigate_to
-    st.rerun()
+        st.session_state.last_history_refresh = 0
+        st.session_state.page = navigate_to
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
